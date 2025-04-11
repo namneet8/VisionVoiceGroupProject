@@ -10,15 +10,23 @@ from chalicelib import (
     text_processing,
     pdf_utils
 )
+from datetime import datetime, timedelta
 from urllib.parse import parse_qs
 from dotenv import load_dotenv
 import sys
 import traceback
+from chalicelib.subscription import (
+    fetch_subscription_tier,
+    display_pricing,
+    check_upload_limit,
+    increment_upload_count,
+    has_feature
+)
 
 # Load environment variables
 load_dotenv()
 
-# Set up development mode - change to True to bypass auth in development
+# Set up development mode
 DEV_MODE = os.getenv('COGNITO_DEVELOPMENT_MODE', '').lower() in ('true', '1', 't')
 
 # Try to import and initialize Cognito auth
@@ -36,15 +44,25 @@ except Exception as e:
         auth_enabled = False
 
 def initialize_session_state():
-    """Initialize session state variables if they don't exist"""
-    if "authenticated" not in st.session_state:
-        # Auto-authenticate in dev mode
-        st.session_state.authenticated = not auth_enabled or DEV_MODE
-    if "user_info" not in st.session_state:
-        # Mock user info in dev mode
-        st.session_state.user_info = {"name": "Developer", "email": "dev@example.com"} if DEV_MODE else None
-    if "access_token" not in st.session_state:
-        st.session_state.access_token = "dev-token" if DEV_MODE else None
+    """Initialize session state variables"""
+    defaults = {
+        "authenticated": not auth_enabled or DEV_MODE,
+        "user_info": {"name": "Developer", "email": "dev@example.com"} if DEV_MODE else None,
+        "access_token": "dev-token" if DEV_MODE else None,
+        "subscription_tier": "free" if DEV_MODE else None,
+        "upload_count": 0,
+        "last_reset": datetime.now().isoformat(),
+        "manage_subscription": False
+    }
+    
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+    # Add this to your initialization sequence to verify credentials
+    print("AWS_ACCESS_KEY_ID exists:", os.getenv("AWS_ACCESS_KEY_ID") is not None)
+    print("AWS_SECRET_ACCESS_KEY exists:", os.getenv("AWS_SECRET_ACCESS_KEY") is not None)
+    print("AWS_REGION:", os.getenv("AWS_REGION"))
+    print("S3_BUCKET_NAME:", os.getenv("S3_BUCKET_NAME"))
 
 def handle_auth_callback():
     """Handle the OAuth callback after user login"""
@@ -52,100 +70,80 @@ def handle_auth_callback():
         return
     
     query_params = st.query_params
-    print(f"Query params in callback: {dict(query_params)}")  # Debug
     if "code" in query_params:
         try:
             code = query_params["code"]
-            # Check for previously processed code to avoid replays
+            
+            # Prevent replay attacks
             if "last_processed_code" in st.session_state and st.session_state.last_processed_code == code:
-                print(f"Skipping duplicate code: {code}")
                 st.query_params.clear()
                 return
             
-            print(f"OAuth state in session: {st.session_state.get('oauth_state', 'None')}")  # Debug
-            
-            # Validate state if present
-            if "state" in query_params and "oauth_state" in st.session_state and st.session_state.oauth_state:
+            # Validate state
+            if "state" in query_params and "oauth_state" in st.session_state:
                 if query_params["state"] != st.session_state.oauth_state:
-                    print(f"State mismatch: received {query_params['state']}, expected {st.session_state.oauth_state}")
                     raise ValueError("State parameter mismatch")
-                print("State validated successfully")
-            else:
-                print("Skipping state validation: state or oauth_state missing")
-                # Optionally store state if received but missing in session
-                if "state" in query_params and not st.session_state.get("oauth_state"):
-                    print(f"Restoring oauth_state from query: {query_params['state']}")
-                    st.session_state.oauth_state = query_params["state"]
             
-            print(f"Processing auth callback with code: {code}")  # Debug
+            # Get tokens and user info
             tokens = auth.get_tokens(code)
-            st.session_state.access_token = tokens["access_token"]
-            
             user_info = auth.get_user_info(tokens["access_token"])
-            st.session_state.user_info = user_info
-            st.session_state.authenticated = True
             
-            # Store the processed code
-            st.session_state.last_processed_code = code
-            # Clear OAuth state and query params
-            st.session_state.oauth_state = None
+            # Set session state
+            st.session_state.update({
+                "access_token": tokens["access_token"],
+                "user_info": user_info,
+                "authenticated": True,
+                "last_processed_code": code,
+                "oauth_state": None,
+                "subscription_tier": fetch_subscription_tier(user_info["username"])
+            })
+            
             st.query_params.clear()
-            print("Authentication successful, rerunning app")
             st.rerun()
         except Exception as e:
-            print(f"Callback error: {str(e)}")  # Debug
             st.error(f"Authentication error: {str(e)}")
-            st.error(traceback.format_exc())
             st.session_state.authenticated = False
-            st.session_state.oauth_state = None
             st.query_params.clear()
             st.rerun()
 
 def login_page():
-    """Display login page and handle authentication"""
+    """Display login page"""
     st.title("✍ VisionVoice: Handwriting to Voice")
     st.header("Login")
-    
-    st.markdown("You need to log in to use this application.")
     
     if auth_enabled:
         if st.button("Sign in with Cognito"):
             try:
-                # Redirect to Cognito login page
                 login_url = auth.get_login_url()
                 st.markdown(f'<meta http-equiv="refresh" content="0;url={login_url}">', unsafe_allow_html=True)
             except Exception as e:
                 st.error(f"Failed to generate login URL: {str(e)}")
-                st.error(traceback.format_exc())
     else:
-        st.error("Authentication is not configured properly. Please contact the administrator.")
+        st.error("Authentication configuration error")
         if DEV_MODE and st.button("Continue in development mode"):
-            st.session_state.authenticated = True
             st.rerun()
 
 def logout():
-    """Clear session state and redirect to logout URL"""
-    # Clear all session state
+    """Handle logout process"""
     st.session_state.authenticated = False
     st.session_state.user_info = None
-    st.session_state.access_token = None
-    st.session_state.oauth_state = None
-    st.session_state.last_processed_code = None  # Clear processed code
+    st.session_state.subscription_tier = None
     
     if auth_enabled and not DEV_MODE:
         try:
             logout_url = auth.logout_url()
-            print(f"Redirecting to logout URL: {logout_url}")  # Debug
             st.markdown(f'<meta http-equiv="refresh" content="0;url={logout_url}">', unsafe_allow_html=True)
         except Exception as e:
-            print(f"Logout error: {str(e)}")  # Debug
             st.error(f"Logout error: {str(e)}")
             st.rerun()
     else:
-        print("Logging out in dev mode")  # Debug
         st.rerun()
 
 def process_file(uploaded_file):
+    """Process uploaded file with tier restrictions"""
+    if not check_upload_limit():
+        return
+
     with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
         tmp_file.write(uploaded_file.read())
         tmp_path = tmp_file.name
@@ -169,99 +167,104 @@ def process_file(uploaded_file):
             st.subheader("✅ Corrected Text:")
             st.write(corrected_text)
             
-            # Handle summarization
+            # Handle features with tier checks
             final_text = handle_summarization(corrected_text)
-            
-            # Handle translation
             final_text = handle_translation(final_text)
-            
-            # Handle speech conversion
             handle_speech_conversion(final_text)
-            
-            # Handle PDF download
             handle_pdf_download(final_text)
+            
+            increment_upload_count()
             
         finally:
             os.unlink(tmp_path)
 
 def handle_summarization(text):
+    """Handle summarization with tier check"""
     if len(text) > 1000:
-        st.subheader("💬 The text is long. Would you like a summary?")
-        choice = st.radio("Summarize?", ["No", "Yes"])
-        if choice == "Yes":
-            st.info("Summarizing with AWS Comprehend...")
-            return comprehend_utils.summarize_text(text)
+        if has_feature("Summarization"):
+            choice = st.radio("Summarize long text?", ["No", "Yes"])
+            if choice == "Yes":
+                return comprehend_utils.summarize_text(text)
+        else:
+            st.warning("🔒 Summarization requires Basic tier or higher")
     return text
 
 def handle_translation(text):
-    st.subheader("🌍 Do you want to translate the text?")
-    target_lang = st.selectbox("Choose a language", ["None", "Spanish", "French", "German", "Chinese"])
-    lang_code_map = {
-        "Spanish": "es",
-        "French": "fr",
-        "German": "de",
-        "Chinese": "zh"
-    }
-
-    if target_lang != "None":
-        st.info(f"Translating to {target_lang}...")
-        translated_text = translate_utils.translate_text(text, lang_code_map[target_lang])
-        st.subheader("🌐 Translated Text:")
-        st.write(translated_text)
-        return translated_text
+    """Handle translation with tier check"""
+    if has_feature("Translation"):
+        target_lang = st.selectbox("Translate to:", ["None", "Spanish", "French", "German", "Chinese"])
+        lang_map = {"Spanish": "es", "French": "fr", "German": "de", "Chinese": "zh"}
+        
+        if target_lang != "None":
+            translated = translate_utils.translate_text(text, lang_map[target_lang])
+            st.subheader("🌐 Translated Text:")
+            st.write(translated)
+            return translated
+    else:
+        st.warning("🔒 Translation requires Pro tier")
     return text
 
 def handle_speech_conversion(text):
-    if st.button("🔊 Convert to Speech"):
-        clean_text = ''.join(c for c in text if c.isprintable())
-        audio_url = polly_utils.text_to_speech(clean_text)
-        if audio_url:
+    """Handle speech conversion with tier check"""
+    if has_feature("Speech Conversion"):
+        if st.button("🔊 Convert to Speech"):
+            audio_url = polly_utils.text_to_speech(text)
             st.audio(audio_url, format="audio/mp3")
-            st.success("✅ Here's your audio!")
-            st.markdown(f"[⬇ Download Audio File]({audio_url})")
+    else:
+        st.warning("🔒 Speech conversion requires Pro tier")
 
 def handle_pdf_download(text):
-    if st.button("📄 Download Text as PDF"):
-        pdf_path = pdf_utils.generate_pdf(text)
-        with open(pdf_path, "rb") as f:
-            st.download_button(
-                label="Download PDF",
-                data=f,
-                file_name="extracted_text.pdf",
-                mime="application/pdf"
-            )
-        os.remove(pdf_path)
+    """Handle PDF download with tier check"""
+    if has_feature("PDF Download"):
+        if st.button("📄 Download PDF"):
+            pdf_path = pdf_utils.generate_pdf(text)
+            with open(pdf_path, "rb") as f:
+                st.download_button("Download PDF", f, "extracted_text.pdf")
+            os.remove(pdf_path)
+    else:
+        st.warning("🔒 PDF download requires Basic tier")
 
 def main_app():
+    """Main application interface"""
     st.title("✍ VisionVoice: Handwriting to Voice")
     
-    # Display user information and logout button in sidebar
-    st.sidebar.subheader("User Information")
+    # Sidebar
+    st.sidebar.subheader("Account")
     if st.session_state.user_info:
-        st.sidebar.write(f"Welcome, {st.session_state.user_info.get('name', 'User')}!")
-        st.sidebar.write(f"Email: {st.session_state.user_info.get('email', 'N/A')}")
+        st.sidebar.write(f"👤 {st.session_state.user_info.get('name', 'User')}")
+        st.sidebar.write(f"📧 {st.session_state.user_info.get('email', 'N/A')}")
+        st.sidebar.write(f"💎 Tier: {st.session_state.subscription_tier.capitalize()}")
+        st.sidebar.write(f"📤 Uploads used: {st.session_state.upload_count}")
     
-    if DEV_MODE:
-        st.sidebar.warning("⚠️ Running in development mode")
-        
-    if st.sidebar.button("Logout"):
+    if st.sidebar.button("🚪 Logout"):
         logout()
     
-    uploaded_file = st.file_uploader("Upload a handwritten image", type=["jpg", "jpeg", "png"])
-
+    if st.sidebar.button("💰 Manage Subscription"):
+        st.session_state.manage_subscription = True
+    
+    # Subscription management view
+    if st.session_state.get("manage_subscription"):
+        display_pricing()
+        if st.button("← Back to App"):
+            st.session_state.manage_subscription = False
+            st.rerun()
+        return
+    
+    # Main functionality
+    uploaded_file = st.file_uploader("Upload handwritten image", type=["jpg", "jpeg", "png"])
     if uploaded_file:
         process_file(uploaded_file)
 
 def main():
-    # Initialize session state
+    """Main application flow"""
     initialize_session_state()
-    
-    # Handle auth callback if code parameter is present
     handle_auth_callback()
     
-    # Show login page or main app based on auth status
     if st.session_state.authenticated:
-        main_app()
+        if st.session_state.subscription_tier is None:
+            display_pricing()
+        else:
+            main_app()
     else:
         login_page()
 

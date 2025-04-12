@@ -23,6 +23,45 @@ from chalicelib.subscription import (
     has_feature
 )
 import logging
+
+
+# Force full-width layout and improve visuals
+st.markdown("""
+    <style>
+        /* Make app use full width */
+        .main .block-container {
+            padding-top: 2rem;
+            padding-bottom: 2rem;
+            padding-left: 3rem;
+            padding-right: 3rem;
+            max-width: 100%;
+        }
+
+        /* Improve button appearance */
+        .stButton > button {
+            background-color: #4CAF50;
+            color: white;
+            font-size: 16px;
+            padding: 0.5em 1em;
+            border-radius: 8px;
+        }
+        .stButton > button:hover {
+            background-color: #45a049;
+        }
+
+        /* Card-like section for description */
+        .app-intro {
+            background-color: #f9f9f9;
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.05);
+        }
+    </style>
+""", unsafe_allow_html=True)
+
+
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -112,11 +151,32 @@ def handle_auth_callback():
             st.rerun()
 
 def login_page():
-    """Display login page"""
+    """Display login page with intro and styling"""
     st.title("✍ VisionVoice: Handwriting to Voice")
-    st.header("Login")
-    
+
+    # Intro card
+    st.markdown(
+        """
+        <div class="app-intro">
+            <h3>Welcome to VisionVoice 👋</h3>
+            <p><strong>VisionVoice</strong> helps transform handwritten content into meaningful, accessible experiences for visually impaired and blind users.</p>
+            <ul>
+                <li>📝 Extract handwritten text from photos</li>
+                <li>🧠 Summarize long passages (Basic tier)</li>
+                <li>🌍 Translate into Spanish, French, and more (Pro tier)</li>
+                <li>🔊 Convert text to natural voice</li>
+                <li>📄 Download results as a PDF</li>
+            </ul>
+            <p>Sign in to get started and explore the features tailored to your needs!</p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    st.header("🔐 Login")
+
     if auth_enabled:
+        st.subheader("Sign in to VisionVoice")
         if st.button("Sign in with Cognito"):
             try:
                 login_url = auth.get_login_url()
@@ -127,6 +187,8 @@ def login_page():
         st.error("Authentication configuration error")
         if DEV_MODE and st.button("Continue in development mode"):
             st.rerun()
+
+
 
 def logout():
     """Handle logout process"""

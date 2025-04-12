@@ -175,6 +175,8 @@ def process_file(uploaded_file):
 
             # Handle features with tier checks
             final_text = handle_summarization(formatted_text)
+            if final_text != formatted_text:  # Only proceed if text was summarized
+                st.write(final_text)
             final_text = handle_translation(final_text)
             handle_speech_conversion(final_text)
             handle_pdf_download(final_text)
@@ -187,7 +189,7 @@ def process_file(uploaded_file):
 
 def handle_summarization(text):
     """Handle summarization with tier check"""
-    if len(text) > 1000:
+    if len(text) > 500:
         if has_feature("Summarization"):
             choice = st.radio("Summarize long text?", ["No", "Yes"])
             if choice == "Yes":

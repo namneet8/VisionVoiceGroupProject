@@ -22,6 +22,11 @@ from chalicelib.subscription import (
     increment_upload_count,
     has_feature
 )
+import logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 
 # Load environment variables
 load_dotenv()
@@ -160,18 +165,20 @@ def process_file(uploaded_file):
             # Show raw text
             st.subheader("📝 Raw Extracted Text:")
             st.write(extracted_text)
-            
-            # Correct spelling
-            st.info("🔍 Correcting spelling errors...")
-            corrected_text = text_processing.correct_spelling(extracted_text)
-            st.subheader("✅ Corrected Text:")
-            st.write(corrected_text)
-            
+
+            # Clean and format sentences
+            st.info("🧹 Formatting text for natural speech...")
+            formatted_text = text_processing.clean_and_format_sentences(extracted_text)
+
+            # st.subheader("✅ Final Cleaned Text:")
+            # st.write(formatted_text)
+
             # Handle features with tier checks
-            final_text = handle_summarization(corrected_text)
+            final_text = handle_summarization(formatted_text)
             final_text = handle_translation(final_text)
             handle_speech_conversion(final_text)
             handle_pdf_download(final_text)
+
             
             increment_upload_count()
             
